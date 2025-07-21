@@ -39,6 +39,12 @@ Version history
       DHT strömförsörjs från D0, sätts låg innan reboot för att starta om DHT
       Det har varit problem med timeout, httpsettimeout är nu på 12 sek o då 
       verkar det funka. Omstart vid returkod -11 (timeout) verkar också funka
+250705  timeout behöver vara upp mot 20 sek för att den inte ska boota om pga timeout
+      varje hel timme pga långa svarstider då
+      Av nån anledning läser den ibland in nollor som ow-id och det verkar inte räcka
+      att boota om noden?
+      Alla sensorer strömförsörjs av port D0 och nytt kommando reset startar om alla
+      Påbörjat koll om ntpHour är lika som hostHour för att kunna rätta till daylightsavings
 
 ***********************************/
 
@@ -50,7 +56,7 @@ Version history
 #include <cstring> // För strstr()
 #include <ArduinoJson.h>
 
-const char* prgver = "1.17t";
+const char* prgver = "1.21t";
 char compiledDateTime[20];
 
 /*******************************************
@@ -88,9 +94,11 @@ uint8_t numberOfDHT = 0;  //default DHT-num
 // We'll use this variable to store a found device address
 DeviceAddress tempDeviceAddress; 
 
+/*
 uint8_t tempcorrDHT = 0;  // correction temp DHT
 uint8_t tempcorr1 = 0;  // correction temp o/w 1
 uint8_t tempcorr2 = 0;  // correction temp o/w 2
+*/
 
 /*******************************************
 Server address
@@ -146,7 +154,10 @@ bool tail = false;  //tailing http-msgs to telnet
 // NTP-settings
 const char* ntpServer = "pool.ntp.org";
 const long gmtOffset_sec = 3600; //3600 is timezone in secs off UTC
-const int daylightOffset_sec = 3600;
+uint daylightOffset_sec = 3600;
+
+uint hostHour = 0;
+uint ntpHour = 0;
 
 // create a WiFiUDP instance
 WiFiUDP ntpUDP;
@@ -165,8 +176,8 @@ const int bufferSize = 1024; //RX-limits to 110
 char payload[bufferSize];
 
 // delaytimer
-const unsigned long txInterval = 30000; // 30 sec
-const unsigned long Ledinterval = 5000; // 5 sec
+const unsigned long txInterval = 60000; // 60 sec report interval
+const unsigned long Ledinterval = 5000; // 5 sec blink rate
 
 /*******************************************
 
@@ -226,8 +237,10 @@ void setup() {
   // Get current time
   timeClient.update();
   
+  ntpHour = timeClient.getHours();
+
   digitalWrite(LED_PIN_RED, LOW);  //red led off - wifi ok
-  digitalWrite(DHT_PWR_PIN, HIGH);  //activate DHT
+  digitalWrite(DHT_PWR_PIN, HIGH);  //activate sensors
 
   // greeting
   Serial.print("Greetings from Eddie! Starting...  ID: ");
@@ -261,7 +274,7 @@ void setup() {
   strcat(TXData, lastIpOctet.c_str());
 
   //Serial.println (TXData);
-  send2server(TXData);
+  send2server(TXData);    // send startup message
 
   // Start Telnet-server
   telnetServer.begin();
@@ -270,10 +283,10 @@ void setup() {
 
   //char compiledDateTime[20];
   snprintf(compiledDateTime, sizeof(compiledDateTime), "%04d-%02d-%02d %s", 
-  atoi(&__DATE__[7]), // År
-  monthToNumber(__DATE__), // Månad
-  atoi(&__DATE__[4]), // Dag
-  __TIME__); // Tid
+    atoi(&__DATE__[7]), // År
+    monthToNumber(__DATE__), // Månad
+    atoi(&__DATE__[4]), // Dag
+    __TIME__); // Tid
 
   String almStr = "Restart ";
   almStr += timeClient.getFormattedTime();
@@ -351,7 +364,7 @@ void loop() {
   }
 
   if (firstFlag) {
-    Serial.println("firstflg");
+    //Serial.println("firstflg");
     Serial.println(numberOfDHT);
     if ((numberOfDHT == 0) && (numberOfDevices == 0)){
       Serial.println(numberOfDHT);
@@ -424,6 +437,7 @@ void telnet_comm(){
 void handleCommand(String command) {
   if (command == "status") {
     telnetClient.println("Systemstatus: All systems green!");
+
   } else if (command.startsWith("set ")) {
     String parameter = command.substring(4); // Extrahera parameter
     telnetClient.println("Settings changed to: " + parameter);
@@ -439,7 +453,7 @@ void handleCommand(String command) {
     telnetClient.print("Program version:");
     telnetClient.println(prgver);
     telnetClient.println(compiledDateTime);
-  }  else if (command == "sens") {
+  } else if (command == "sens") {
     telnetClient.print("Number of DHT-sensors: ");
     telnetClient.print(numberOfDHT);
     telnetClient.print(", o/w sensors: ");
@@ -472,9 +486,21 @@ void handleCommand(String command) {
   } else if (command == "ip") {
     telnetClient.println(WiFi.localIP());
   } else if (command == "tail") {
+    addAlarm("tail command");
     tail = !tail; //toggle tail setting
+  } else if (command == "reset") {  // reset sensors
+    digitalWrite(DHT_PWR_PIN, LOW);
+    delay(1000); //delay slightly
+    digitalWrite(DHT_PWR_PIN, HIGH);  //st5art sensors
+    telnetClient.println("Sensors reset");
+  } else if (command == "exit") {  // quit session
+    String DispString = "telnet exit(): "+timeClient.getFormattedTime()+'\0';
+    logMessage(DispString);
+    addAlarm("telnet exit()");
+    delay(100);
+    telnetClient.stop();
   } else {
-    telnetClient.println("Unknown cmd (log/ver/sens/time/boot/id/blink/ip/tail)");
+    telnetClient.println("Unknown cmd (log/ver/sens/time/boot/id/blink/ip/tail/reset/exit)");
   }
   telnetClient.print("> ");
 }
@@ -557,7 +583,7 @@ void readDHT_sensor(){
   // Get temp and humid
   float humid = dht.readHumidity();
   float temp = dht.readTemperature();
-  temp = temp + tempcorrDHT;  // add correction if needed
+  //temp = temp + tempcorrDHT;  // add correction if needed
 
   // check readings
   if (isnan(humid) || isnan(temp)) {
@@ -619,8 +645,10 @@ void readDHT_sensor(){
     send2server(TXData);
     //Serial.println(TXData);
   }
-  Serial.print("Consec:");
-  Serial.println(consecErrors);
+  if (tail){
+    Serial.print("Consec:");
+    Serial.println(consecErrors);
+  }
 }
 
 //void sendNotification(const char* message) {
@@ -714,53 +742,78 @@ void send2server(char mess[]){
 
           // Parsar payload direkt
           DeserializationError error = deserializeJson(doc, payload);
-          if (error) {
-              //Serial.print(F("JSON-parsing misslyckades: "));
-              //Serial.println(error.c_str());
-              return;
+          if ((error) && (tail)){
+            Serial.print(F("JSON-parsing misslyckades: "));
+            Serial.println(error.c_str());
+            return;
           }
 
           // Extrahera tidsfältet
-          const char* time = doc["time"];
-          if (time) {
-              // Rensa tiden från escape-tecken
-              char cleanedTime[20];
-              size_t j = 0;
-              for (size_t i = 0; time[i] != '\0'; i++) {
-                  if (time[i] != '\\') {
-                      cleanedTime[j++] = time[i];
-                  }
+          const char* timeStr = doc["data"]["time"];  // "250719 22:37:47"
+
+          if (timeStr != nullptr) {
+            // Rensa tiden från escape-tecken
+            char cleanedTime[20];
+            size_t j = 0;
+            for (size_t i = 0; timeStr[i] != '\0'; i++) {
+              if (timeStr[i] != '\\') {
+                cleanedTime[j++] = timeStr[i];
               }
-              cleanedTime[j] = '\0';
+            }
+            cleanedTime[j] = '\0';
+            //Serial.println(cleanedTime);
+            //Serial.println(timeStr);
 
-              char formattedTime[15];
-              snprintf(formattedTime, sizeof(formattedTime), "%.2s%.2s:%.2s%.2s",
-                      cleanedTime,       // 09
-                      cleanedTime + 3,   // 12
-                      cleanedTime + 6,   // 23
-                      cleanedTime + 9);  // 08
+            char formattedTime[15];
 
-              strcpy(dateStr, formattedTime);
+            // make condensed date and time  
+            snprintf(formattedTime, sizeof(formattedTime), "%.2s%.2s:%.2s%.2s",
+              cleanedTime,       // 09
+              cleanedTime + 3,   // 12
+              cleanedTime + 6,   // 23
+              cleanedTime + 9);  // 08
+            
+            strcpy(dateStr, formattedTime);
+            
+            char hostHour[3];
+            snprintf(hostHour, sizeof(formattedTime), "%.2s", cleanedTime + 6);   // 23
+            if (tail){
+              Serial.println(hostHour);
+            }
+
+            const char* hourMinute = timeStr + 7;      // pekar på "22:37:47"
+
+            // Extrahera bara hh:mm
+            char hhmm[6];
+            strncpy(hhmm, hourMinute, 5);
+            hhmm[5] = '\0';
+
+
+            //strcpy(dateStr, cleanedTime);
+            if (tail){
+              Serial.print(F("Tid (hh:mm): "));
+              Serial.println(hhmm);
+            }
           }
 
-                // Kolla om reboot=true finns
+          // Kolla om reboot=true finns
           if (doc["content"][0]["reboot"] == "1") {
-    //        Serial.println("boot");
+            // Serial.println("boot");
             digitalWrite(DHT_PWR_PIN, LOW);  //reset the DHT
             delay(1000); //delay slightly
             ESP.reset();
           } else {
-    //        Serial.println("no boot");
+            // Serial.println("no boot");
           }
-        }
+        }   // httpCode == 200
       } else {  // not 200
         if (tail){
-        //if (1){
-            telnetClient.println(httpCode);
-            Serial.println(httpCode);
+          telnetClient.println(httpCode);
+          Serial.println(httpCode);
         }
         //httpErrors ++;  // incr error counter
         httpFail = true;
+        addAlarm("http error code");
       }
     }
     http.end(); 
@@ -848,7 +901,7 @@ void logHttpError(int httpCode, NTPClient& timeClient) {
 
  /****************************
 
-  Init Dallas ow-sensore
+  Init Dallas ow-sensors
 
  ****************************/
 
