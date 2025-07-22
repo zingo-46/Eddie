@@ -17,6 +17,7 @@ https://arduino-esp8266.readthedocs.io/en/2.6.1/esp8266wifi/client-examples.html
 https://randomnerdtutorials.com/esp8266-ds18b20-temperature-sensor-web-server-with-arduino-ide/
 https://randomnerdtutorials.com/guide-for-ds18b20-temperature-sensor-with-arduino/
 
+https://pubs.opengroup.org/onlinepubs/009696799/functions/strftime.html
 
 Eddie
 Eddie är den glättiga och optimistiska datorn på skeppet Hjärtat av Guld. Han är känd för sin extremt 
@@ -56,7 +57,7 @@ Version history
 #include <cstring> // För strstr()
 #include <ArduinoJson.h>
 
-const char* prgver = "1.21t";
+const char* prgver = "1.22t";
 char compiledDateTime[20];
 
 /*******************************************
@@ -94,11 +95,6 @@ uint8_t numberOfDHT = 0;  //default DHT-num
 // We'll use this variable to store a found device address
 DeviceAddress tempDeviceAddress; 
 
-/*
-uint8_t tempcorrDHT = 0;  // correction temp DHT
-uint8_t tempcorr1 = 0;  // correction temp o/w 1
-uint8_t tempcorr2 = 0;  // correction temp o/w 2
-*/
 
 /*******************************************
 Server address
@@ -141,8 +137,8 @@ const int numNetworks = sizeof(wifiNetworks) / sizeof(WiFiCredentials);
 WiFiClientSecure client;    //https
 HTTPClient http;
 int httpCode = 0;
-//uint httpTimeout = 12000;
-uint httpTimeout = 20000;   // http response
+//uint httpTimeout = 10000;
+uint httpTimeout = 20000;   // http response timeout
 String lastIpOctet = "";
 
 // create Telnet-server
@@ -152,18 +148,14 @@ WiFiClient telnetClient;
 bool tail = false;  //tailing http-msgs to telnet
 
 // NTP-settings
-const char* ntpServer = "pool.ntp.org";
-const long gmtOffset_sec = 3600; //3600 is timezone in secs off UTC
-uint daylightOffset_sec = 3600;
+#define MY_NTP_SERVER "pool.ntp.org"           
+#define MY_TZ "CET-1CEST,M3.5.0/02,M10.5.0/03"   
 
-uint hostHour = 0;
-uint ntpHour = 0;
+/* Globals */
+time_t now;                         // this are the seconds since Epoch (1970) - UTC
+tm tm;                              // the structure tm holds time information in a more convenient way
 
-// create a WiFiUDP instance
-WiFiUDP ntpUDP;
-// create a NTPClient instance
-NTPClient timeClient(ntpUDP, ntpServer,gmtOffset_sec, 30*60000); // 60*60000 is update interval in ms
-
+// h/w defines
 char chipIdStr[12]; 
 char owaddrStr[20];
 
@@ -183,10 +175,12 @@ const unsigned long Ledinterval = 5000; // 5 sec blink rate
 
 Logging
 
+// alarmline   mmdd.hhmm:xxxxxxxxxxxxxx   24 chars + null
+
 *******************************************/
 #define BUFFER_SIZE 20 // number of logentries
 #define ALARM_LENGTH 30 // max lenght of each line
-// alarmline   mmdd.hhmm:xxxxxxxxxxxxxx   24 chars + null
+
 char alarmBuffer[BUFFER_SIZE][ALARM_LENGTH]; // Buffert för larm
 int currentIndex = 0; // Pekar på var nästa larm ska sparas
 int totalAlarms = 0; // Totalt antal lagrade larm
@@ -204,6 +198,34 @@ uint32_t httpStop = 0; // http timing
 
 bool stopNotify = false;  //avoid sending notify every min
 bool firstFlag = true; //flag for first attempt after restar
+
+
+
+void showTime() {
+  time(&now);                       // read the current time
+  localtime_r(&now, &tm);           // update the structure tm with the current time
+  Serial.print("year:");
+  Serial.print(tm.tm_year + 1900);  // years since 1900
+  Serial.print("\tmonth:");
+  Serial.print(tm.tm_mon + 1);      // January = 0 (!)
+  Serial.print("\tday:");
+  Serial.print(tm.tm_mday);         // day of month
+  Serial.print("\thour:");
+  Serial.print(tm.tm_hour);         // hours since midnight  0-23
+  Serial.print("\tmin:");
+  Serial.print(tm.tm_min);          // minutes after the hour  0-59
+  Serial.print("\tsec:");
+  Serial.print(tm.tm_sec);          // seconds after the minute  0-61*
+  Serial.print("\twday");
+  Serial.print(tm.tm_wday);         // days since Sunday 0-6
+  if (tm.tm_isdst == 1)             // Daylight Saving Time flag
+    Serial.print("\tDST");
+  else
+    Serial.print("\tstandard");
+  Serial.println();
+}
+
+
 
 /*******************************************
 
@@ -231,6 +253,10 @@ void setup() {
   // starta wifi och logga in på routern
   setup_wifi() ;
 
+//  configTime(MY_TZ, MY_NTP_SERVER); // --> Here is the IMPORTANT ONE LINER needed in your sketch!
+  configTzTime(MY_TZ, MY_NTP_SERVER); 
+
+  /*
   // Start NTP-client
   timeClient.begin();
 
@@ -238,6 +264,14 @@ void setup() {
   timeClient.update();
   
   ntpHour = timeClient.getHours();
+*/
+
+  // set the time
+  time_t now;
+  struct tm timeinfo;
+  
+  time(&now);
+  localtime_r(&now, &timeinfo);
 
   digitalWrite(LED_PIN_RED, LOW);  //red led off - wifi ok
   digitalWrite(DHT_PWR_PIN, HIGH);  //activate sensors
@@ -247,7 +281,7 @@ void setup() {
   Serial.println(chipId);
 
   // display time
-  String DispString = "Time is: "+timeClient.getFormattedTime();
+  String DispString = "Time is: "+getCurrentTimeString();
   Serial.println(DispString);
 
   Serial.print("Program version:");
@@ -264,8 +298,9 @@ void setup() {
   strcat(TXData, chipIdStr);
   strcat(TXData, "&start=");
     
-  if (strlen(TXData) + timeClient.getFormattedTime().length() < sizeof(TXData)) {
-    strcat(TXData, timeClient.getFormattedTime().c_str());
+  if (strlen(TXData) + getCurrentTimeString().length() < sizeof(TXData)) {
+    //strcat(TXData, getCurrentTimeCString()).c_str());
+    strcat(TXData, getCurrentTimeCString());
   } else {
     //Serial.println("TXData too small for DispString - weird...");
   }
@@ -289,7 +324,7 @@ void setup() {
     __TIME__); // Tid
 
   String almStr = "Restart ";
-  almStr += timeClient.getFormattedTime();
+  //almStr += getCurrentTimeCString();
 
   addAlarm(almStr);
   Serial.println(almStr);
@@ -298,6 +333,13 @@ void setup() {
   strcat(TXData, chipIdStr);
   strcpy (notifyPrio, "high");
   sendNotify(TXData, notifyPrio);
+
+
+
+showTime();
+
+
+
 } // setup()
 
 int monthToNumber(const char* dateStr) {
@@ -396,7 +438,7 @@ void check_telnet_conn(){
       Serial.println("Telnet-client connected!");
       telnetClient.println("Welcome to Eddies Telnet-server!");
 
-      String DispString = "Time is: "+timeClient.getFormattedTime()+'\0';
+      String DispString = "Time is: "+getCurrentTimeString()+'\0';
       logMessage(DispString);
       telnetClient.print("> ");
 
@@ -467,7 +509,7 @@ void handleCommand(String command) {
       }
     }
   } else if (command == "time") {
-    String DispString = "Time is: "+timeClient.getFormattedTime()+'\0';
+    String DispString = "Time is: "+getCurrentTimeString()+'\0';
     telnetClient.println(DispString);
   } else if (command == "boot") {
     //ESP.restart();
@@ -494,7 +536,7 @@ void handleCommand(String command) {
     digitalWrite(DHT_PWR_PIN, HIGH);  //st5art sensors
     telnetClient.println("Sensors reset");
   } else if (command == "exit") {  // quit session
-    String DispString = "telnet exit(): "+timeClient.getFormattedTime()+'\0';
+    String DispString = "telnet exit(): "+getCurrentTimeString()+'\0';
     logMessage(DispString);
     addAlarm("telnet exit()");
     delay(100);
@@ -538,7 +580,7 @@ void readOW_sensor(){
 
     // check readings
     if (isnan(temperatureC) || temperatureC < -10) {
-      String DispString = timeClient.getFormattedTime()+"  NaN value from 1w-sensor!"+'\0';
+      String DispString = getCurrentTimeString()+"  NaN value from 1w-sensor!"+'\0';
       logMessage(DispString);
       temperatureC = -99;
       consecErrors++;
@@ -584,6 +626,7 @@ void readDHT_sensor(){
   float humid = dht.readHumidity();
   float temp = dht.readTemperature();
   //temp = temp + tempcorrDHT;  // add correction if needed
+  char timeStr[9]; // HH:MM:SS + nullterminering
 
   // check readings
   if (isnan(humid) || isnan(temp)) {
@@ -594,9 +637,9 @@ void readDHT_sensor(){
     consecErrors++;
     if (consecErrors < LimconsecErrors) {
       String almStr = "NaN from DHT ";
-      almStr += timeClient.getFormattedTime();  // Lägg till tiden
+      //almStr += getCurrentTimeCString();  // Lägg till tiden
       addAlarm(almStr);
-      String DispString = timeClient.getFormattedTime()+"  NaN value from DHT-sensor!"+'\0';
+      String DispString = getCurrentTimeString() +"  NaN value from DHT-sensor!"+'\0';
       logMessage(DispString);
     } else {
       if (!stopNotify) {
@@ -606,7 +649,7 @@ void readDHT_sensor(){
         sendNotify(TXData, notifyPrio);
         stopNotify = true;
       }
-      Serial.println("restart");
+      Serial.println("restart sensors");
       digitalWrite(DHT_PWR_PIN, LOW);  //deactivate the DHT
       delay(1000); //delay slightly
       digitalWrite(DHT_PWR_PIN, HIGH);  //activate the DHT
@@ -699,7 +742,6 @@ void send2server(char mess[]){
       Serial.println(mess);
     }
   
-    //HTTPClient http;
     client.setInsecure();
     HTTPClient http;
 
@@ -748,54 +790,6 @@ void send2server(char mess[]){
             return;
           }
 
-          // Extrahera tidsfältet
-          const char* timeStr = doc["data"]["time"];  // "250719 22:37:47"
-
-          if (timeStr != nullptr) {
-            // Rensa tiden från escape-tecken
-            char cleanedTime[20];
-            size_t j = 0;
-            for (size_t i = 0; timeStr[i] != '\0'; i++) {
-              if (timeStr[i] != '\\') {
-                cleanedTime[j++] = timeStr[i];
-              }
-            }
-            cleanedTime[j] = '\0';
-            //Serial.println(cleanedTime);
-            //Serial.println(timeStr);
-
-            char formattedTime[15];
-
-            // make condensed date and time  
-            snprintf(formattedTime, sizeof(formattedTime), "%.2s%.2s:%.2s%.2s",
-              cleanedTime,       // 09
-              cleanedTime + 3,   // 12
-              cleanedTime + 6,   // 23
-              cleanedTime + 9);  // 08
-            
-            strcpy(dateStr, formattedTime);
-            
-            char hostHour[3];
-            snprintf(hostHour, sizeof(formattedTime), "%.2s", cleanedTime + 6);   // 23
-            if (tail){
-              Serial.println(hostHour);
-            }
-
-            const char* hourMinute = timeStr + 7;      // pekar på "22:37:47"
-
-            // Extrahera bara hh:mm
-            char hhmm[6];
-            strncpy(hhmm, hourMinute, 5);
-            hhmm[5] = '\0';
-
-
-            //strcpy(dateStr, cleanedTime);
-            if (tail){
-              Serial.print(F("Tid (hh:mm): "));
-              Serial.println(hhmm);
-            }
-          }
-
           // Kolla om reboot=true finns
           if (doc["content"][0]["reboot"] == "1") {
             // Serial.println("boot");
@@ -806,14 +800,14 @@ void send2server(char mess[]){
             // Serial.println("no boot");
           }
         }   // httpCode == 200
-      } else {  // not 200
+      } else {  // > 0 not 200
         if (tail){
           telnetClient.println(httpCode);
           Serial.println(httpCode);
         }
         //httpErrors ++;  // incr error counter
         httpFail = true;
-        addAlarm("http error code");
+        addAlarm("http error code "+ String(httpCode));
       }
     }
     http.end(); 
@@ -890,17 +884,6 @@ void setup_wifi() {
 
  /****************************
 
-    log HTTP-error
-
- ****************************/
-
-void logHttpError(int httpCode, NTPClient& timeClient) {
-  String logEntry = "[" + timeClient.getFormattedTime() + "] HTTP error: " + String(httpCode);
-  logMessage(logEntry);
-}
-
- /****************************
-
   Init Dallas ow-sensors
 
  ****************************/
@@ -966,7 +949,11 @@ void blink_red_led(){
 
 // add log entry
 void addAlarm(const String& alarmMessage) {
-  String logMessage = dateStr;
+  
+  time(&now);
+  localtime_r(&now, &tm);
+  
+  String logMessage = getLogDate();
   logMessage += ":";
   logMessage += alarmMessage;
   //snprintf(logMessage, sizeof(logMessage), "%s:%s", dateStr, alarmMessage);
@@ -988,4 +975,29 @@ void showAlarms(Print& output) {
         int index = (start + i) % BUFFER_SIZE;
         output.println(alarmBuffer[index]);
     }
+}
+
+const char* getCurrentTimeCString() {
+  static char buf[20]; // statisk så den lever kvar efter retur
+  time(&now);
+  localtime_r(&now, &tm);
+  strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm);
+  return buf;
+}
+
+String getCurrentTimeString() {
+  time(&now);
+  localtime_r(&now, &tm);
+
+  char buf[20];
+  strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm);
+  return String(buf);
+}
+
+String getLogDate() {
+  time(&now);
+  localtime_r(&now, &tm);
+  char buf[15];
+  strftime(buf, sizeof(buf), "%m%d:%H%M", &tm);
+  return String(buf);
 }
