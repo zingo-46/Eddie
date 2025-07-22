@@ -45,7 +45,9 @@ Version history
       Av nån anledning läser den ibland in nollor som ow-id och det verkar inte räcka
       att boota om noden?
       Alla sensorer strömförsörjs av port D0 och nytt kommando reset startar om alla
-      Påbörjat koll om ntpHour är lika som hostHour för att kunna rätta till daylightsavings
+      Uppdaterat till POSIX-metod för time för att få stöd för DST
+250722  lagt till funktion för att hämta enhetens titel från servern. Telnet-Kommando
+      för att visa det är "title".
 
 ***********************************/
 
@@ -55,10 +57,14 @@ Version history
 #include <stdio.h>
 #include <string.h>
 #include <cstring> // För strstr()
-#include <ArduinoJson.h>
 
-const char* prgver = "1.22t";
+#include <ArduinoJson.h>
+#include <ArduinoJson.hpp>
+
+
+const char* prgver = "1.25t";
 char compiledDateTime[20];
+char deviceTitle[50];
 
 /*******************************************
 DHT temp-/hum sensor stuff
@@ -127,7 +133,8 @@ struct WiFiCredentials {
 WiFiCredentials wifiNetworks[] = {
   {"Jagaren", ""},
   {"V150", "armborst"},
-  {"103", "abc12abc12345"}
+  {"103", "abc12abc12345"},
+  {"TN_wifi_A841AF", "abc12abc12345"}
 };
 
 // number of WiFi-networks
@@ -541,6 +548,17 @@ void handleCommand(String command) {
     addAlarm("telnet exit()");
     delay(100);
     telnetClient.stop();
+  } else if (command == "title") {  // display title
+    String dev = "Device: ";
+    String DispString = dev + deviceTitle;
+    telnetClient.println(DispString);
+    
+    /*
+    String DispString = "Device: "+deviceTitle;
+    logMessage(DispString);
+    addAlarm(deviceTitle);
+
+    */
   } else {
     telnetClient.println("Unknown cmd (log/ver/sens/time/boot/id/blink/ip/tail/reset/exit)");
   }
@@ -788,6 +806,22 @@ void send2server(char mess[]){
             Serial.print(F("JSON-parsing misslyckades: "));
             Serial.println(error.c_str());
             return;
+          }
+          String di = doc["content"][0]["title"];
+          Serial.println (di);
+          Serial.println (strlen(deviceTitle));
+
+          if (strlen(deviceTitle) < ){
+            Serial.println ("Null");
+
+            strncpy(deviceTitle, doc["content"][0]["title"].as<String>().c_str(), sizeof(deviceTitle) - 1);
+            deviceTitle[sizeof(deviceTitle) - 1] = '\0';  // Säkerhetsnull
+
+           // strncpy(deviceTitle, doc["content"][0]["title"], sizeof(deviceTitle) - 1);
+           //strncpy(deviceTitle, di, sizeof(deviceTitle) - 1);
+           // deviceTitle[sizeof(deviceTitle) - 1] = '\0';  // Säkerställ att strängen är null-terminerad
+            Serial.print("deviceTitle: ");
+            Serial.println(deviceTitle);
           }
 
           // Kolla om reboot=true finns
