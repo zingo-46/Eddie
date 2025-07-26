@@ -19,6 +19,11 @@ https://randomnerdtutorials.com/guide-for-ds18b20-temperature-sensor-with-arduin
 
 https://pubs.opengroup.org/onlinepubs/009696799/functions/strftime.html
 
+https://werner.rothschopf.net/202011_arduino_esp8266_ntp_en.htm
+
+https://mischianti.org/network-time-protocol-ntp-timezone-and-daylight-saving-time-dst-with-esp8266-esp32-or-arduino/
+
+
 Eddie
 Eddie är den glättiga och optimistiska datorn på skeppet Hjärtat av Guld. Han är känd för sin extremt 
 positiva attityd, vilket ofta irriterar besättningen. Eddie styr skeppets funktioner och kommunicerar 
@@ -46,8 +51,10 @@ Version history
       att boota om noden?
       Alla sensorer strömförsörjs av port D0 och nytt kommando reset startar om alla
       Uppdaterat till POSIX-metod för time för att få stöd för DST
-250722  lagt till funktion för att hämta enhetens titel från servern. Telnet-Kommando
-      för att visa det är "title".
+250722  lagt till funktion för att hämta enhetens titel från servern. Telnetkommando
+      för att visa det är "title". Exit-kommando för att koppla ner telnet-sessionen.
+      Reset-kommandö startar om alla sensorer via D0. Väntfunktion för att invänta NTP
+
 
 ***********************************/
 
@@ -62,7 +69,7 @@ Version history
 #include <ArduinoJson.hpp>
 
 
-const char* prgver = "1.25t";
+const char* prgver = "1.29t";
 char compiledDateTime[20];
 char deviceTitle[50];
 
@@ -72,7 +79,7 @@ DHT temp-/hum sensor stuff
 const int DHTPIN = D1;
 const int DHTTYPE = DHT22; // DHT22 or DHT11 
 DHT dht(DHTPIN, DHTTYPE);
-const int DHT_PWR_PIN = D0;  //pwrpin för DHT
+const int DHT_PWR_PIN = D0;  //pwrpin för senstorerna
 
 /**********************************************
 LED  RG-led & ow
@@ -149,18 +156,20 @@ uint httpTimeout = 20000;   // http response timeout
 String lastIpOctet = "";
 
 // create Telnet-server
-WiFiServer telnetServer(23);
+WiFiServer telnetServer(23);  //port 23
 WiFiClient telnetClient;
 
 bool tail = false;  //tailing http-msgs to telnet
 
 // NTP-settings
 #define MY_NTP_SERVER "pool.ntp.org"           
-#define MY_TZ "CET-1CEST,M3.5.0/02,M10.5.0/03"   
+#define MY_TZ "CET-1CEST,M3.5.0/02,M10.5.0/03"   // tz, DST etc
 
 /* Globals */
 time_t now;                         // this are the seconds since Epoch (1970) - UTC
 tm tm;                              // the structure tm holds time information in a more convenient way
+
+bool waitForValidTime(unsigned long timeoutMs = 10000); // functio to wait for time from NTP
 
 // h/w defines
 char chipIdStr[12]; 
@@ -192,7 +201,7 @@ char alarmBuffer[BUFFER_SIZE][ALARM_LENGTH]; // Buffert för larm
 int currentIndex = 0; // Pekar på var nästa larm ska sparas
 int totalAlarms = 0; // Totalt antal lagrade larm
 
-char dateStr[12];    // e.g. 1229:2345
+char dateStr[12];    // e.g. 1229:2345 saving space in the log
 
 uint8 consecErrors = 0; // consec DHT errors to stop alarms
 const uint8 LimconsecErrors = 5;
@@ -205,7 +214,6 @@ uint32_t httpStop = 0; // http timing
 
 bool stopNotify = false;  //avoid sending notify every min
 bool firstFlag = true; //flag for first attempt after restar
-
 
 
 void showTime() {
@@ -231,8 +239,6 @@ void showTime() {
     Serial.print("\tstandard");
   Serial.println();
 }
-
-
 
 /*******************************************
 
@@ -263,15 +269,14 @@ void setup() {
 //  configTime(MY_TZ, MY_NTP_SERVER); // --> Here is the IMPORTANT ONE LINER needed in your sketch!
   configTzTime(MY_TZ, MY_NTP_SERVER); 
 
-  /*
-  // Start NTP-client
-  timeClient.begin();
-
-  // Get current time
-  timeClient.update();
-  
-  ntpHour = timeClient.getHours();
-*/
+  Serial.println("Waiting for time from NTP...");
+  if (waitForValidTime()) {
+    Serial.println("NTP time acquired!");
+    //showTime();  // Visa den giltiga tiden
+  } else {
+    Serial.println("Failed to get NTP time within timeout!");
+    // 🔔 Sätt flagga, larma, skriv logg, visa med LED, etc.
+  }
 
   // set the time
   time_t now;
@@ -315,7 +320,7 @@ void setup() {
   strcat(TXData, "&ip=");
   strcat(TXData, lastIpOctet.c_str());
 
-  //Serial.println (TXData);
+  Serial.println (TXData);
   send2server(TXData);    // send startup message
 
   // Start Telnet-server
@@ -340,12 +345,6 @@ void setup() {
   strcat(TXData, chipIdStr);
   strcpy (notifyPrio, "high");
   sendNotify(TXData, notifyPrio);
-
-
-
-showTime();
-
-
 
 } // setup()
 
@@ -414,7 +413,7 @@ void loop() {
 
   if (firstFlag) {
     //Serial.println("firstflg");
-    Serial.println(numberOfDHT);
+    //Serial.println(numberOfDHT);
     if ((numberOfDHT == 0) && (numberOfDevices == 0)){
       Serial.println(numberOfDHT);
       Serial.println("Nosens");
@@ -560,7 +559,7 @@ void handleCommand(String command) {
 
     */
   } else {
-    telnetClient.println("Unknown cmd (log/ver/sens/time/boot/id/blink/ip/tail/reset/exit)");
+    telnetClient.println("Unknown cmd (log/ver/sens/time/boot/id/blink/ip/tail/reset/exit/title)");
   }
   telnetClient.print("> ");
 }
@@ -587,8 +586,10 @@ void logMessage(String message) {
 void readOW_sensor(){
   noInterrupts(); // stop interrupts
   numberOfDevices = sensors.getDeviceCount();
-  Serial.print("Antal ow: ");
-  Serial.println(numberOfDevices, DEC);
+  if (tail){
+    Serial.print("Antal ow: ");
+    Serial.println(numberOfDevices, DEC);
+  }
 
   for(int i=0;i<numberOfDevices; i++){
     sensors.getAddress(tempDeviceAddress, i);
@@ -607,6 +608,7 @@ void readOW_sensor(){
       }
     } 
 
+    Serial.print("OW ");
     Serial.print(i);
     Serial.print(": ");
     Serial.print(temperatureC);
@@ -808,18 +810,10 @@ void send2server(char mess[]){
             return;
           }
           String di = doc["content"][0]["title"];
-          Serial.println (di);
-          Serial.println (strlen(deviceTitle));
-
-          if (strlen(deviceTitle) < ){
-            Serial.println ("Null");
-
+          if (strlen(deviceTitle) < 6){
             strncpy(deviceTitle, doc["content"][0]["title"].as<String>().c_str(), sizeof(deviceTitle) - 1);
             deviceTitle[sizeof(deviceTitle) - 1] = '\0';  // Säkerhetsnull
 
-           // strncpy(deviceTitle, doc["content"][0]["title"], sizeof(deviceTitle) - 1);
-           //strncpy(deviceTitle, di, sizeof(deviceTitle) - 1);
-           // deviceTitle[sizeof(deviceTitle) - 1] = '\0';  // Säkerställ att strängen är null-terminerad
             Serial.print("deviceTitle: ");
             Serial.println(deviceTitle);
           }
@@ -930,7 +924,7 @@ void InitDallas() {
   Serial.print("Locating devices...");
   Serial.print("Found ");
   Serial.print(numberOfDevices, DEC);
-  Serial.println(" devices.");
+  Serial.println(" OW-devices.");
 
   // Loop through each device, print out address
   for(int i=0;i<numberOfDevices; i++){
@@ -1034,4 +1028,22 @@ String getLogDate() {
   char buf[15];
   strftime(buf, sizeof(buf), "%m%d:%H%M", &tm);
   return String(buf);
+}
+
+bool waitForValidTime(unsigned long timeoutMs) {
+  time_t now;
+  struct tm timeinfo;
+  unsigned long start = millis();
+
+  while (millis() - start < timeoutMs) {
+    time(&now);
+    if (localtime_r(&now, &timeinfo)) {
+      if (timeinfo.tm_year > (2020 - 1900)) {
+        return true;  // Tid är okej
+      }
+    }
+    delay(200);  // Minska belastning lite
+  }
+
+  return false; // Timeout utan giltig tid
 }
