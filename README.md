@@ -1,5 +1,4 @@
 # Eddie
-Test repo
-This is my first edit on GitHub!
-now modified
+Mätnod Jägaren,
+Arduino/ESP 8266
 
